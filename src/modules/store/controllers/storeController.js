@@ -12,6 +12,7 @@ import {
   deleteSale,
   getSalesReport
 } from "../models/ModelStore.js";
+import { pool } from "../../../dataBase/connectionDataBase.js";
 
 // =====================================================
 //         CONTROLADORES DE PRODUCTOS
@@ -154,16 +155,34 @@ export const handleDeleteProduct = async (req, res) => {
     }
 
     const { id } = req.params;
+
+    // VALIDACIÓN: Obtener el producto
+    const product = await getProductById(id);
+    if (!product) {
+      return res.status(404).send("Producto no encontrado");
+    }
+
+    // ⛔ VALIDACIÓN 1: El stock debe ser 0
+    if (product.stock > 0) {
+      return res.status(400).send(`No se puede eliminar el producto "${product.nombre}" porque aún tiene ${product.stock} unidades en stock. El stock debe estar en 0 para proceder.`);
+    }
+
+    // Ahora deleteProduct realiza un "Borrado Lógico" (activo = 0)
+    // Esto permite mantener la integridad de las ventas históricas.
     const success = await deleteProduct(id);
 
     if (success) {
-      console.log(`✅ Producto ${id} eliminado`);
-      res.redirect("/store/inventory");
+      console.log(`✅ Producto ${id} marcado como inactivo (soft delete)`);
+      res.redirect("/store/inventory?success=delete");
     } else {
       res.status(404).send("Producto no encontrado");
     }
   } catch (error) {
     console.error("Error en handleDeleteProduct:", error);
+    // Si llegara a fallar por la base de datos (por si acaso falla la validación previa)
+    if (error.code === 'ER_ROW_IS_REFERENCED_2') {
+      return res.status(400).send("No se puede eliminar este producto porque está referenciado en ventas o reportes existentes.");
+    }
     res.status(500).send("Error al eliminar el producto");
   }
 };
@@ -447,9 +466,10 @@ export const generateReport = async (req, res) => {
 // Enviar reporte por email
 export const sendReportByEmail = async (req, res) => {
   try {
-    const { fechaInicio, fechaFin, destinatario, asunto } = req.body;
+    const { fechaInicio, fechaFin, periodo, destinatario, asunto } = req.body;
 
     const reporte = await getSalesReport(fechaInicio, fechaFin);
+    if (periodo) reporte.periodo = periodo;
 
     // Validar si hay datos antes de generar y enviar
     if (!reporte.datos || reporte.datos.length === 0) {
@@ -463,21 +483,30 @@ export const sendReportByEmail = async (req, res) => {
     const { generateReportPDF } = await import("../utils/storeReportGenerator.js");
     const pdfPath = await generateReportPDF(reporte);
 
-    // Enviar por email
+    // 4. Configurar y enviar el correo
     const emailService = (await import("../../../services/emailService.js")).default;
     const fs = await import("fs");
 
     await emailService.send({
       to: destinatario,
-      subject: asunto || `Reporte de Ventas - ${fechaInicio} a ${fechaFin}`,
-      text: `Reporte de ventas del ${fechaInicio} al ${fechaFin}`,
-      html: `<p>Adjunto encontrará el reporte de ventas del período solicitado.</p>`,
+      subject: asunto || `📊 Reporte de Ventas: ${fechaInicio} - ${fechaFin}`,
+      text: `Adjunto se encuentra el reporte de ventas del período ${fechaInicio} al ${fechaFin}.`,
+      html: `
+        <div style="font-family: sans-serif; color: #333;">
+          <h2>Reporte de Ventas</h2>
+          <p>Se ha generado un nuevo reporte de ventas para el <b>Hotel Residency Club</b>.</p>
+          <p><b>Período:</b> ${fechaInicio} al ${fechaFin}</p>
+          <hr />
+          <p style="font-size: 0.8em; color: #666;">Este es un correo automático, por favor no responda.</p>
+        </div>
+      `,
       attachments: [{
-        filename: `reporte_ventas_${fechaInicio}_${fechaFin}.pdf`,
+        filename: `Reporte_Ventas_${periodo || 'periodo'}_${fechaInicio}_${fechaFin}.pdf`,
         content: fs.default.readFileSync(pdfPath)
       }]
     });
 
+    console.log(`✅ [Email] Reporte enviado correctamente a: ${destinatario}`);
     res.json({
       success: true,
       message: "Reporte enviado por correo exitosamente"
@@ -494,9 +523,10 @@ export const sendReportByEmail = async (req, res) => {
 // Enviar reporte por WhatsApp
 export const sendReportByWhatsApp = async (req, res) => {
   try {
-    const { fechaInicio, fechaFin, telefono } = req.body;
+    const { fechaInicio, fechaFin, periodo, telefono } = req.body;
 
     const reporte = await getSalesReport(fechaInicio, fechaFin);
+    if (periodo) reporte.periodo = periodo;
 
     // Validar si hay datos antes de generar y enviar
     if (!reporte.datos || reporte.datos.length === 0) {
@@ -510,31 +540,33 @@ export const sendReportByWhatsApp = async (req, res) => {
     const { generateReportPDF } = await import("../utils/storeReportGenerator.js");
     const pdfPath = await generateReportPDF(reporte);
 
-    // Enviar por WhatsApp
+    // 4. Enviar a través del servicio de WhatsApp
     const whatsappService = (await import("../../../services/whatsappService.js")).default;
-    const fs = await import("fs");
 
-    const jid = whatsappService.formatPhoneNumber(telefono);
-
-    if (whatsappService.isConnected && whatsappService.socket) {
-      await whatsappService.socket.sendMessage(jid, {
-        document: fs.default.readFileSync(pdfPath),
-        mimetype: 'application/pdf',
-        fileName: `reporte_ventas_${fechaInicio}_${fechaFin}.pdf`,
-        caption: `📊 Reporte de Ventas\n${fechaInicio} - ${fechaFin}`
-      });
-      console.log(`✅ Reporte enviado por WhatsApp a ${telefono}`);
+    if (!whatsappService.isConnected) {
+      throw new Error("El servicio de WhatsApp no está vinculado.");
     }
 
-    res.json({
-      success: true,
-      message: "Reporte enviado por WhatsApp exitosamente"
-    });
+    const mensaje = `📊 *Reporte de Ventas (${periodo || 'General'})*\n📅 Periodo: ${fechaInicio} al ${fechaFin}\n🏢 *Hotel Residency Club*`;
+    const nombreArchivo = `Reporte_${periodo || 'Ventas'}_${fechaInicio}_${fechaFin}.pdf`;
+
+    const result = await whatsappService.enviarMensajeConPDF(telefono, mensaje, pdfPath, nombreArchivo);
+
+    if (result.success) {
+      console.log(`✅ [WhatsApp] Reporte enviado correctamente a: ${telefono}`);
+      res.json({
+        success: true,
+        message: "Reporte enviado por WhatsApp exitosamente"
+      });
+    } else {
+      throw new Error(result.error);
+    }
   } catch (error) {
     console.error("Error en sendReportByWhatsApp:", error);
     res.status(500).json({
       success: false,
-      error: "Error al enviar el reporte"
+      error: "Error al enviar el reporte",
+      details: error.message
     });
   }
 };

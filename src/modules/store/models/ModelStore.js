@@ -8,7 +8,8 @@ import { pool } from "../../../dataBase/connectionDataBase.js";
 export const getAllProducts = async () => {
   try {
     const [rows] = await pool.query(`
-      SELECT * FROM productos 
+      SELECT * FROM productos
+      WHERE activo = 1
       ORDER BY categoria, nombre
     `);
     return rows;
@@ -51,7 +52,7 @@ export const updateProduct = async (id, productData) => {
   const { nombre, descripcion, categoria, precio, stock, imagen } = productData;
   try {
     const [result] = await pool.query(`
-      UPDATE productos 
+      UPDATE productos
       SET nombre = ?, descripcion = ?, categoria = ?, precio = ?, stock = ?, imagen = ?
       WHERE id = ?
     `, [nombre, descripcion, categoria, precio, stock, imagen || null, id]);
@@ -66,7 +67,7 @@ export const updateProduct = async (id, productData) => {
 export const deleteProduct = async (id) => {
   try {
     const [result] = await pool.query(`
-      DELETE FROM productos WHERE id = ?
+      UPDATE productos SET activo = 0 WHERE id = ?
     `, [id]);
     return result.affectedRows > 0;
   } catch (error) {
@@ -79,7 +80,7 @@ export const deleteProduct = async (id) => {
 export const updateProductStock = async (id, cantidad) => {
   try {
     const [result] = await pool.query(`
-      UPDATE productos 
+      UPDATE productos
       SET stock = stock - ?
       WHERE id = ? AND stock >= ?
     `, [cantidad, id, cantidad]);
@@ -94,7 +95,7 @@ export const updateProductStock = async (id, cantidad) => {
 export const addStockToProduct = async (id, quantityToAdd) => {
   try {
     const [result] = await pool.query(`
-      UPDATE productos 
+      UPDATE productos
       SET stock = stock + ?
       WHERE id = ?
     `, [quantityToAdd, id]);
@@ -135,7 +136,7 @@ export const createSale = async (saleData) => {
 
       // Actualizar stock
       const [updateResult] = await connection.query(`
-        UPDATE productos 
+        UPDATE productos
         SET stock = stock - ?
         WHERE id = ? AND stock >= ?
       `, [producto.cantidad, producto.id, producto.cantidad]);
@@ -160,7 +161,7 @@ export const createSale = async (saleData) => {
 export const updateSalePaths = async (id, pdf_path, qr_path) => {
   try {
     const [result] = await pool.query(`
-      UPDATE ventas 
+      UPDATE ventas
       SET pdf_path = ?, qr_path = ?
       WHERE id = ?
     `, [pdf_path, qr_path, id]);
@@ -175,7 +176,7 @@ export const updateSalePaths = async (id, pdf_path, qr_path) => {
 export const getAllSales = async () => {
   try {
     const [rows] = await pool.query(`
-      SELECT 
+      SELECT
         v.id,
         v.nombre_cliente,
         v.created_at AS fecha_venta,
@@ -203,7 +204,7 @@ export const getSaleById = async (id) => {
   try {
     // Obtener venta
     const [venta] = await pool.query(`
-      SELECT 
+      SELECT
         v.*,
         v.created_at as fecha_venta,
         u.username AS usuario,
@@ -219,7 +220,7 @@ export const getSaleById = async (id) => {
 
     // Obtener detalles
     const [detalles] = await pool.query(`
-      SELECT 
+      SELECT
         dv.*,
         p.nombre AS producto_nombre,
         p.categoria AS producto_categoria
@@ -247,8 +248,8 @@ export const deleteSale = async (id) => {
 
     // Obtener detalles antes de eliminar para restaurar stock
     const [detalles] = await connection.query(`
-      SELECT producto_id, cantidad 
-      FROM venta_detalles 
+      SELECT producto_id, cantidad
+      FROM venta_detalles
       WHERE venta_id = ?
     `, [id]);
 
@@ -283,7 +284,7 @@ export const deleteSale = async (id) => {
 export const getSalesReport = async (fechaInicio, fechaFin) => {
   try {
     const [ventas] = await pool.query(`
-      SELECT 
+      SELECT
         v.id,
         v.nombre_cliente,
         v.created_at as fecha_venta,
@@ -302,7 +303,7 @@ export const getSalesReport = async (fechaInicio, fechaFin) => {
     // Calcular estadísticas
     const totalVentas = ventas.length;
     const totalIngresos = ventas.reduce((sum, v) => sum + parseFloat(v.total), 0);
-    
+
     const ventasPorTipoPago = {
       efectivo: ventas.filter(v => v.tipo_pago === 'efectivo').reduce((sum, v) => sum + parseFloat(v.total), 0),
       transferencia: ventas.filter(v => v.tipo_pago === 'transferencia').reduce((sum, v) => sum + parseFloat(v.total), 0),
@@ -311,7 +312,7 @@ export const getSalesReport = async (fechaInicio, fechaFin) => {
 
     // Productos más vendidos
     const [productosMasVendidos] = await pool.query(`
-      SELECT 
+      SELECT
         p.nombre,
         p.nombre,
         SUM(dv.cantidad) AS cantidad_vendida,
@@ -319,7 +320,7 @@ export const getSalesReport = async (fechaInicio, fechaFin) => {
       FROM venta_detalles dv
       INNER JOIN productos p ON dv.producto_id = p.id
       INNER JOIN ventas v ON dv.venta_id = v.id
-      WHERE v.created_at BETWEEN ? AND ?
+      WHERE DATE(v.created_at) BETWEEN ? AND ?
       GROUP BY dv.producto_id, p.nombre
       ORDER BY cantidad_vendida DESC
       LIMIT 10
@@ -363,10 +364,22 @@ export const setupStoreTables = async () => {
         precio DECIMAL(10, 2) NOT NULL,
         stock INT NOT NULL DEFAULT 0,
         imagen VARCHAR(500),
+        activo TINYINT(1) DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
+
+    // GESTIÓN DE MIGRACIÓN: Asegurar que la columna 'activo' existe si la tabla ya existía
+    try {
+      await pool.query('SELECT activo FROM productos LIMIT 1');
+    } catch (error) {
+      if (error.code === 'ER_BAD_FIELD_ERROR') {
+        console.log('🔧 Agregando columna "activo" a la tabla productos...');
+        await pool.query('ALTER TABLE productos ADD COLUMN activo TINYINT(1) DEFAULT 1 AFTER imagen');
+        console.log('✅ Columna "activo" agregada correctamente');
+      }
+    }
 
     // Tabla de ventas
     await pool.query(`
@@ -404,10 +417,10 @@ export const setupStoreTables = async () => {
 
     // Insertar algunos productos de ejemplo si no existen
     const [existingProducts] = await pool.query('SELECT COUNT(*) as count FROM productos');
-    
+
     if (existingProducts[0].count === 0) {
       console.log('📦 Insertando productos de ejemplo...');
-      
+
       const sampleProducts = [
         ['Coca Cola 600ml', 'Refresco de cola 600ml', 'bebidas', 25.00, 50],
         ['Agua Natural 500ml', 'Agua purificada 500ml', 'bebidas', 15.00, 100],
@@ -445,8 +458,8 @@ export const getProductsWithLowStock = async (minStock = 5) => {
   try {
     const [rows] = await pool.query(`
       SELECT id, nombre, categoria, stock, precio
-      FROM productos 
-      WHERE stock <= ?
+      FROM productos
+      WHERE stock <= ? AND activo = 1
       ORDER BY stock ASC, categoria
     `, [minStock]);
     return rows;
@@ -460,7 +473,7 @@ export const getProductsWithLowStock = async (minStock = 5) => {
 export const getBestSellingProducts = async (days = 30) => {
   try {
     const [rows] = await pool.query(`
-      SELECT 
+      SELECT
         p.id,
         p.nombre,
         p.categoria,
@@ -471,7 +484,7 @@ export const getBestSellingProducts = async (days = 30) => {
       FROM productos p
       INNER JOIN venta_detalles dv ON p.id = dv.producto_id
       INNER JOIN ventas v ON dv.venta_id = v.id
-      WHERE v.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      WHERE v.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY) AND p.activo = 1
       GROUP BY p.id, p.nombre, p.categoria, p.precio, p.stock
       ORDER BY total_vendido DESC
       LIMIT 10
@@ -487,7 +500,7 @@ export const getBestSellingProducts = async (days = 30) => {
 export const getSalesByCategory = async (days = 30) => {
   try {
     const [rows] = await pool.query(`
-      SELECT 
+      SELECT
         p.categoria,
         COUNT(DISTINCT v.id) as numero_ventas,
         SUM(dv.cantidad) as productos_vendidos,
@@ -496,7 +509,7 @@ export const getSalesByCategory = async (days = 30) => {
       FROM productos p
       INNER JOIN venta_detalles dv ON p.id = dv.producto_id
       INNER JOIN ventas v ON dv.venta_id = v.id
-      WHERE v.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      WHERE v.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY) AND p.activo = 1
       GROUP BY p.categoria
       ORDER BY ingresos_totales DESC
     `, [days]);
@@ -515,10 +528,10 @@ export const updateBulkStock = async (updates) => {
 
     for (const update of updates) {
       const { productId, newStock, reason } = update;
-      
+
       // Actualizar stock
       await connection.query(`
-        UPDATE productos 
+        UPDATE productos
         SET stock = ?, updated_at = NOW()
         WHERE id = ?
       `, [newStock, productId]);
@@ -541,7 +554,7 @@ export const updateBulkStock = async (updates) => {
 export const generateInventoryReport = async () => {
   try {
     const [inventory] = await pool.query(`
-      SELECT 
+      SELECT
         categoria,
         COUNT(*) as total_productos,
         SUM(stock) as stock_total,
@@ -550,18 +563,20 @@ export const generateInventoryReport = async () => {
         MIN(stock) as stock_minimo,
         MAX(stock) as stock_maximo
       FROM productos
+      WHERE activo = 1
       GROUP BY categoria
       ORDER BY valor_inventario DESC
     `);
 
     const [totals] = await pool.query(`
-      SELECT 
+      SELECT
         COUNT(*) as productos_totales,
         SUM(stock) as stock_total,
         SUM(stock * precio) as valor_total_inventario,
         COUNT(CASE WHEN stock = 0 THEN 1 END) as productos_agotados,
         COUNT(CASE WHEN stock <= 5 THEN 1 END) as productos_stock_bajo
       FROM productos
+      WHERE activo = 1
     `);
 
     return {
@@ -578,12 +593,12 @@ export const generateInventoryReport = async () => {
 export const checkProductAvailability = async (products) => {
   try {
     const results = [];
-    
+
     for (const item of products) {
       const [product] = await pool.query(`
         SELECT id, nombre, stock, precio
-        FROM productos 
-        WHERE id = ?
+        FROM productos
+        WHERE id = ? AND activo = 1
       `, [item.id]);
 
       if (product.length === 0) {
